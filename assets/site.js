@@ -253,15 +253,40 @@
   function push(v) { if (still) return; vel = Math.max(-7, Math.min(7, vel + v)); kick(); }
   window.__cyl = { kick: kick, push: push, tick: function (ms) { vnow += ms; frame(vnow); }, state: function () { return { vel: vel, bend: bend, morph: morph, rot: rot, yOff: yOff, cam: cam, R: R, asp: asp, cards: nCards }; } };
 
-  // —— 输入：滚动差值 / 顶部上滚滚轮 / 横向拖动 ——
+  // —— 输入：滚轮/触控板直接转圆柱（参考站同款）；页面滚动作补充；拖动横竖皆可 ——
+  // 根因修复：旧逻辑 wheel 仅在 scrollY<=0 且向上时 push，向下滚只会滚 240vh 页面，圆柱几乎不动。
   var lastY = scrollY;
-  addEventListener('scroll', function () { var d = scrollY - lastY; lastY = scrollY; if (scrollY < wrap.offsetHeight) push(d * .006); }, { passive: true });
-  stage.addEventListener('wheel', function (e) { if (scrollY <= 0 && e.deltaY < 0) push(e.deltaY * .006); }, { passive: true });
+  function inHero() { return scrollY < Math.max(0, wrap.offsetHeight - innerHeight * 0.85); }
+  addEventListener('scroll', function () {
+    var d = scrollY - lastY; lastY = scrollY;
+    if (inHero()) push(d * .012);
+  }, { passive: true });
+  stage.addEventListener('wheel', function (e) {
+    if (!inHero()) return;                       // 已滚过主视觉，把滚轮还给页面
+    e.preventDefault();
+    var dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= 16;             // 行模式
+    if (e.deltaMode === 2) dy *= innerHeight;    // 页模式
+    push(dy * .018);
+  }, { passive: false });
   var drag = null;
-  stage.addEventListener('pointerdown', function (e) { if (e.target.closest('a,button')) return; drag = { x: e.clientX, t: performance.now() }; });
-  addEventListener('pointermove', function (e) { if (!drag) return; var dx = e.clientX - drag.x; drag.x = e.clientX; push(-dx * .012); });
-  addEventListener('pointerup', function () { drag = null; }); addEventListener('pointercancel', function () { drag = null; });
-  addEventListener('keydown', function (e) { if (e.key === 'ArrowLeft') push(-1.2); if (e.key === 'ArrowRight') push(1.2); });
+  stage.addEventListener('pointerdown', function (e) {
+    if (e.target.closest('a,button')) return;
+    drag = { x: e.clientX, y: e.clientY }; try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  stage.addEventListener('pointermove', function (e) {
+    if (!drag) return;
+    var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    // 横向拖与纵向拖都转；纵向与滚轮方向一致
+    push(-dx * .02 + dy * .02);
+  });
+  function endDrag(e) { drag = null; try { stage.releasePointerCapture(e.pointerId); } catch (err) {} }
+  stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
+  addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') push(-1.4);
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') push(1.4);
+  });
 
   new IntersectionObserver(function (es) { visible = es[0].isIntersecting; if (visible) { last = 0; kick(); } }).observe(wrap);
   addEventListener('resize', function () { resize(); if (still) frame(performance.now()); });
