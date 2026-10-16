@@ -39,11 +39,46 @@
 
   var CFG = window.CJ_CARDS || { count: 60, perRing: 10, images: [] };
   var cv = document.getElementById('cyl');
-  function noGL(why) { root.classList.add('no-gl'); root.dataset.hero = 'static' + (why ? '-' + why : ''); }
-  if (/[?&]fallback=1/.test(location.search)) return noGL('forced');
+  function bindFallbackSpin() {
+    // CSS 兜底也可转：滚轮/拖动改 --spin，空闲慢转
+    var cards = document.querySelector('.ss-cards');
+    if (!cards) return;
+    var ang = 0, v = 0, last = performance.now();
+    function tick(now) {
+      var dt = Math.min(.05, (now - last) / 1000); last = now;
+      v *= Math.exp(-dt * 2.2); v += (rm.matches ? 0 : 0.35) * dt * 60 * 0.02;
+      ang += (v + (rm.matches ? 0 : 18) * dt);
+      cards.style.setProperty('--spin', ang.toFixed(2) + 'deg');
+      requestAnimationFrame(tick);
+    }
+    function bump(d) { v = Math.max(-40, Math.min(40, v + d)); }
+    addEventListener('wheel', function (e) {
+      if (scrollY > wrap.offsetHeight - innerHeight * 0.85) return;
+      e.preventDefault(); bump(e.deltaY * 0.04);
+    }, { passive: false });
+    var drag = null;
+    stage.addEventListener('pointerdown', function (e) {
+      if (e.target.closest('a,button')) return;
+      drag = { x: e.clientX, y: e.clientY };
+    });
+    addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      bump(-(e.clientX - drag.x) * 0.08 + (e.clientY - drag.y) * 0.08);
+      drag = { x: e.clientX, y: e.clientY };
+    });
+    addEventListener('pointerup', function () { drag = null; });
+    requestAnimationFrame(tick);
+  }
+  function noGL(why) {
+    root.classList.add('no-gl'); root.dataset.hero = 'static' + (why ? '-' + why : '');
+    bindFallbackSpin();
+  }
+  if (/[?&]fallback=1/.test(location.search)) { noGL('forced'); return; }
   var gl = null;
-  try { gl = cv.getContext('webgl', { antialias: true, alpha: false, premultipliedAlpha: false, powerPreference: 'low-power' }); } catch (e) {}
-  if (!gl || !gl.getExtension('OES_standard_derivatives')) return noGL('nogl');
+  try { gl = cv.getContext('webgl', { antialias: true, alpha: false, premultipliedAlpha: false, powerPreference: 'high-performance' }); } catch (e) {}
+  if (!gl) { noGL('nogl'); return; }
+  // 导数扩展可选：没有就关掉网格线 shader 的 fwidth，仍跑卡片
+  var hasDeriv = !!gl.getExtension('OES_standard_derivatives');
 
   // —— 着色器 ——
   var ORANGE = [1, 0.357, 0.078], INK = [0.086, 0.059, 0.043];
@@ -99,7 +134,8 @@
     return { p: p, u: u, a: gl.getAttribLocation(p, vs.indexOf('attribute vec3 a') >= 0 ? 'a' : 'p') };
   }
   var PB, PC, PT;
-  try { PB = prog(VS_BG, FS_BG); PC = prog(VS_CARD, FS_CARD); PT = prog(VS_TXT, FS_TXT); } catch (e) { console.warn(e); return noGL('shader'); }
+  var FS_BG_SAFE = 'precision highp float;varying vec2 n;uniform vec3 uBg,uInk;void main(){float g=abs(fract(n.x*8.)-.5)*abs(fract(n.y*8.)-.5);float line=smoothstep(.02,.0,g);float side=smoothstep(.15,1.,abs(n.x));vec3 col=mix(uBg,uInk,line*.35+side*.45);gl_FragColor=vec4(col,1.);}';
+  try { PB = prog(VS_BG, hasDeriv ? FS_BG : FS_BG_SAFE); PC = prog(VS_CARD, FS_CARD); PT = prog(VS_TXT, FS_TXT); } catch (e) { console.warn(e); return noGL('shader'); }
 
   var quad = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
@@ -169,7 +205,7 @@
   var W = 0, H = 0, asp = 1, cam = 10, R = 4.2, GAP = 3.6, L = 21.6, FOV = 40, tanY = Math.tan(FOV * Math.PI / 360);
   var CARD_W = 1.7, CARD_H = 1.28, PER = CFG.perRing || 10, Proj = new Float32Array(16);
   var rot = 0, yOff = 0, vel = 0, dir = 1, bend = 0, morph = 0, clearY = 1.2, last = 0, t0 = performance.now(), dirty = true, raf = 0, visible = true;
-  var still = rm.matches, REC = /[?&]rec=1/.test(location.search), vnow = 0;   // ?rec=1：录屏用，停掉 rAF，由 __cyl.tick(ms) 逐帧推进
+  var still = rm.matches, REC = /[?&]rec=1/.test(location.search), vnow = 0, userPulse = 0;   // ?rec=1：录屏用，停掉 rAF，由 __cyl.tick(ms) 逐帧推进
   function resize() {
     var dpr = Math.min(devicePixelRatio || 1, 2), r = stage.getBoundingClientRect();
     W = Math.max(1, r.width); H = Math.max(1, r.height); asp = W / H;
@@ -191,19 +227,21 @@
     raf = 0;
     var dt = Math.min(.05, (now - (last || now)) / 1000); last = now;
     var t = (now - t0) / 1000;
-    if (!still) {
-      vel *= Math.exp(-dt * 2.4);                       // 惯性：指数衰减
-      if (Math.abs(vel) > .02) dir = vel > 0 ? 1 : -1;
-      var spin = vel + dir * .12;                       // 空闲慢速自转（方向跟随最后一次拨动）
-      rot += spin * dt;
-      // 只有用户滚动/拖动产生的速度才带动环带上下，避免空闲自转把卡片转到正中字上
-      yOff += vel * dt * .55;
-      var tb = Math.max(-1, Math.min(1, vel / 3.2)); bend += (tb - bend) * Math.min(1, dt * 6);
-    }
+    // still(减少动态)=无空闲自转；用户滚轮/拖动时仍有惯性。正常模式空闲明显自转。
+    vel *= Math.exp(-dt * 2.4);
+    if (Math.abs(vel) > .02) dir = vel > 0 ? 1 : -1;
+    userPulse *= Math.exp(-dt * 1.8);
+    var allowAuto = !still;
+    var spin = vel + (allowAuto ? dir * 0.42 : 0);     // 空闲自转约 24°/s，肉眼可见「在动」
+    if (still && Math.abs(vel) < 0.02 && userPulse < 0.05) spin = 0;
+    rot += spin * dt;
+    yOff += (allowAuto ? spin * 0.35 : vel * 0.55) * dt;
+    var tb = Math.max(-1, Math.min(1, vel / 3.2)); bend += (tb - bend) * Math.min(1, dt * 6);
     morph += (modeTarget - morph) * (still ? 1 : Math.min(1, dt * 3.5));
     if (raf === 0 && document.getElementById('idx') && ((now | 0) % 6 === 0 || still)) updIdx();
     draw(still ? 0 : t);
-    if (!still && visible && !REC) raf = requestAnimationFrame(frame);
+    var keep = visible && !REC && (!still || Math.abs(vel) > 0.02 || userPulse > 0.05);
+    if (keep) raf = requestAnimationFrame(frame);
   }
   function draw(t) {
     gl.viewport(0, 0, cv.width, cv.height);
@@ -250,42 +288,53 @@
     if (best !== lastIdx) { lastIdx = best; idxEl.textContent = '产品图 ' + (best + 1 < 10 ? '0' : '') + (best + 1) + ' / ' + COUNT; }
   }
   function kick() { if (!raf && visible && !REC) raf = requestAnimationFrame(frame); }
-  function push(v) { if (still) return; vel = Math.max(-7, Math.min(7, vel + v)); kick(); }
-  window.__cyl = { kick: kick, push: push, tick: function (ms) { vnow += ms; frame(vnow); }, state: function () { return { vel: vel, bend: bend, morph: morph, rot: rot, yOff: yOff, cam: cam, R: R, asp: asp, cards: nCards }; } };
+  function push(v) {
+    vel = Math.max(-7, Math.min(7, vel + v));
+    userPulse = 1;   // 用户操作：减少动态时也转几下
+    kick();
+  }
 
-  // —— 输入：滚轮/触控板直接转圆柱（参考站同款）；页面滚动作补充；拖动横竖皆可 ——
-  // 根因修复：旧逻辑 wheel 仅在 scrollY<=0 且向上时 push，向下滚只会滚 240vh 页面，圆柱几乎不动。
+  // —— 输入：window 级滚轮（顶栏/圆角层也能收到）+ 拖动 + 键 ——
   var lastY = scrollY;
   function inHero() { return scrollY < Math.max(0, wrap.offsetHeight - innerHeight * 0.85); }
   addEventListener('scroll', function () {
     var d = scrollY - lastY; lastY = scrollY;
-    if (inHero()) push(d * .012);
+    if (inHero()) push(d * .014);
   }, { passive: true });
-  stage.addEventListener('wheel', function (e) {
-    if (!inHero()) return;                       // 已滚过主视觉，把滚轮还给页面
+  function onWheel(e) {
+    if (!inHero()) return;
     e.preventDefault();
-    var dy = e.deltaY;
-    if (e.deltaMode === 1) dy *= 16;             // 行模式
-    if (e.deltaMode === 2) dy *= innerHeight;    // 页模式
-    push(dy * .018);
-  }, { passive: false });
+    var dy = e.deltaY, dx = e.deltaX;
+    if (e.deltaMode === 1) { dy *= 16; dx *= 16; }
+    if (e.deltaMode === 2) { dy *= innerHeight; dx *= innerWidth; }
+    push(dy * .022 + dx * .012);
+  }
+  addEventListener('wheel', onWheel, { passive: false });
   var drag = null;
   stage.addEventListener('pointerdown', function (e) {
-    if (e.target.closest('a,button')) return;
-    drag = { x: e.clientX, y: e.clientY }; try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+    if (e.target.closest && e.target.closest('a,button,.mode,.burger')) return;
+    if (!inHero()) return;
+    drag = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    try { stage.setPointerCapture(e.pointerId); } catch (err) {}
   });
-  stage.addEventListener('pointermove', function (e) {
-    if (!drag) return;
+  addEventListener('pointermove', function (e) {
+    if (!drag || (e.pointerId != null && e.pointerId !== drag.id)) return;
     var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     drag.x = e.clientX; drag.y = e.clientY;
-    // 横向拖与纵向拖都转；纵向与滚轮方向一致
-    push(-dx * .02 + dy * .02);
+    push(-dx * .028 + dy * .028);
   });
-  function endDrag(e) { drag = null; try { stage.releasePointerCapture(e.pointerId); } catch (err) {} }
-  stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
+  function endDrag(e) {
+    if (!drag) return;
+    if (e && e.pointerId != null && drag.id != null && e.pointerId !== drag.id) return;
+    drag = null;
+    try { if (e) stage.releasePointerCapture(e.pointerId); } catch (err) {}
+  }
+  addEventListener('pointerup', endDrag);
+  addEventListener('pointercancel', endDrag);
   addEventListener('keydown', function (e) {
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') push(-1.4);
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') push(1.4);
+    if (!inHero()) return;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); push(-1.6); }
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); push(1.6); }
   });
 
   new IntersectionObserver(function (es) { visible = es[0].isIntersecting; if (visible) { last = 0; kick(); } }).observe(wrap);
